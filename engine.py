@@ -11,7 +11,9 @@ class JacobianPINNEngine:
     def __init__(
         self,
         sine_model_path,
+        cosine_model_path,
         power_model_path,
+        exponential_model_path,
         dtype=tf.float64
     ):
 
@@ -32,6 +34,11 @@ class JacobianPINNEngine:
             compile=False
         )
 
+        self.cosine_model = tf.keras.models.load_model(
+            cosine_model_path,
+            compile=False
+        )
+
         # ----------------------------------------------------
         # Function-family registry
         #
@@ -40,8 +47,12 @@ class JacobianPINNEngine:
 
         self.derivative_registry = {
             "sine": self._sine_derivative,
+            "sin": self._sine_derivative,
             "power": self._power_derivative,
-            "exp": self._exponential_derivative
+            "exp": self._exponential_derivative,
+            "exponential": self._exponential_derivative,
+            "cos": self._cosine_derivative,
+            "cosine": self._cosine_derivative
         }
 
 
@@ -105,6 +116,44 @@ class JacobianPINNEngine:
             derivative.numpy()[0, 0]
         )
 
+    # --------------------------------------------------------
+    #  Exponential inference
+    # --------------------------------------------------------
+    def _exponential_derivative(
+          self,
+          variable_value,
+          coefficient,
+          parameter,
+      ):
+          """Differentiate coefficient * exp(parameter * x)."""
+          x = tf.constant(
+              [[float(variable_value)]], dtype=self.DTYPE
+          )
+          rate = tf.constant(
+              [[float(parameter)]], dtype=self.DTYPE
+          )
+          amplitude = tf.constant(
+              [[float(coefficient)]], dtype=self.DTYPE
+          )
+
+          with tf.GradientTape() as tape:
+              tape.watch(x)
+
+              # Exponential model input order: [x, rate, coefficient]
+              prediction = self.exponential_model(
+                  tf.concat([x, rate, amplitude], axis=1),
+                  training=False,
+              )
+
+          derivative = tape.gradient(prediction, x)
+
+          if derivative is None:
+              raise RuntimeError(
+                  "Exponential model derivative is unavailable."
+              )
+
+          return float(derivative.numpy()[0, 0])
+
 
     # --------------------------------------------------------
     # 3. Sine PINN inference
@@ -157,6 +206,66 @@ class JacobianPINNEngine:
             )
 
             prediction = self.sine_model(
+                model_input,
+                training=False
+            )
+
+        derivative = tape.gradient(
+            prediction,
+            x
+        )
+
+        return float(
+            derivative.numpy()[0, 0]
+        )
+    
+    def _cosine_derivative(
+        self,
+        variable_value,
+        coefficient,
+        parameter
+    ):
+        """
+        Evaluate derivative of:
+
+            coefficient * sin(parameter * x)
+
+        using the trained Sine PINN.
+
+        Here:
+            coefficient = amplitude
+            parameter   = frequency
+        """
+
+        x = tf.constant(
+            [[float(variable_value)]],
+            dtype=self.DTYPE
+        )
+
+        amplitude = tf.constant(
+            [[float(coefficient)]],
+            dtype=self.DTYPE
+        )
+
+        frequency = tf.constant(
+            [[float(parameter)]],
+            dtype=self.DTYPE
+        )
+
+        with tf.GradientTape() as tape:
+
+            tape.watch(x)
+
+            model_input = tf.concat(
+                [
+                    x,
+                    amplitude,
+                    frequency
+                ],
+                axis=1
+            )
+
+            prediction = self.cosine_model(
                 model_input,
                 training=False
             )
@@ -462,7 +571,9 @@ class JacobianPINNEngine:
 
               Supported values:
                   "power"
-                  "sine"
+                  "sine" or "sin"
+                  "cosine" or "cos"
+                  "exp" or "exponential"
 
           coefficient
               Leading coefficient or amplitude.
@@ -485,7 +596,15 @@ class JacobianPINNEngine:
               "x": 1.0,
               "y": 2.0
           }
-
+      
+      DOMAINS
+      ----------------
+      Each function is defined on slightly different domains.
+      Trig functions (sine/cosine) are defined from -π to π with amplitudes from 0.5 to 3.0
+      Trig functions have a minimum and maximum amplitude of -5.0 to 5.0
+      The Power and Exponential functions are supported over the interval (0,1)
+      The Exponential function supports exponential growth rates of 1 to 4, and coefficients of 0.01 to 2.0
+      The Power function supports powers of 1 to 5.0, and coefficients of -5.0 to 5.0
 
       BUILDING THE JACOBIAN
       ---------------------
